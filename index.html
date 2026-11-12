@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0e1216">
+<title>Bass Pilot Mesure</title>
+<style>
+  :root { --bg:#0e1216; --card:#1a2027; --line:#2a323c; --txt:#fff; --mute:#b8c3cf; --acc:#00e5ff; --ok:#39ff7a; --bad:#ff5c5c; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt); font:16px/1.45 -apple-system,system-ui,sans-serif; padding:18px 16px 40px; }
+  h1 { font-size:24px; margin:4px 0 2px; } h1 span { color:var(--acc); }
+  .mute { color:var(--mute); font-size:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:14px; margin:14px 0; }
+  ol { margin:6px 0 0; padding-left:20px; } li { margin:4px 0; }
+  button { width:100%; border:0; border-radius:16px; padding:18px; font:800 19px -apple-system,system-ui,sans-serif; background:var(--acc); color:#04161a; }
+  button:disabled { opacity:.45; }
+  #etat { font-size:20px; font-weight:800; text-align:center; margin:16px 0 6px; min-height:28px; }
+  #detail { text-align:center; color:var(--mute); font-size:14px; min-height:20px; }
+  .bar { height:14px; background:#0a0d10; border-radius:7px; overflow:hidden; margin-top:10px; }
+  .bar i { display:block; height:100%; width:0; background:linear-gradient(90deg,#39ff7a,#ffc857 70%,#ff5c5c); transition:width .1s; }
+  canvas { width:100%; height:170px; display:block; }
+  .steps { display:flex; gap:6px; margin-top:10px; } .steps div { flex:1; text-align:center; font-size:12px; padding:6px 2px; border-radius:10px; background:#0a0d10; color:var(--mute); }
+  .steps div.on { background:var(--acc); color:#04161a; font-weight:800; } .steps div.ok { color:var(--ok); }
+</style>
+</head>
+<body>
+<h1>Bass Pilot <span>Mesure</span></h1>
+<div class="mute">L'iPhone écoute ta Clio à ta place et règle le son de l'autoradio.</div>
+
+<div class="card" id="aide">
+  <b>Avant de lancer</b>
+  <ol>
+    <li>Moteur et ventilation coupés, portes fermées, personne ne parle.</li>
+    <li>Volume de l'autoradio vers <b>15 à 18</b>.</li>
+    <li>Assieds-toi à ta place et tiens l'iPhone <b>à hauteur de tes oreilles</b>, micro du bas vers le pare-brise, sans le couvrir.</li>
+    <li>Touche « Mesurer » et ne bouge plus pendant 30 secondes.</li>
+  </ol>
+</div>
+
+<button id="go">🎤  Mesurer</button>
+<div id="etat"></div>
+<div id="detail"></div>
+<div class="steps"><div data-p="bruit">Silence</div><div data-p="tout">Les deux</div><div data-p="gauche">Gauche</div><div data-p="droite">Droite</div></div>
+<div class="bar"><i id="niv"></i></div>
+
+<div class="card" id="res" style="display:none">
+  <b>Ta Clio telle qu'elle sonne</b>
+  <canvas id="graph" width="700" height="340"></canvas>
+  <div class="mute">Grave à gauche, aigu à droite. La correction a été envoyée à l'autoradio.</div>
+</div>
+
+<script>
+(() => {
+  const MF = [31.5,40,50,63,80,100,125,160,200,250,315,400,500,630,800,1000,1250,1600,2000,2500,3150,4000,5000,6300,8000,10000,12500,16000];
+  const PHASES = ["bruit", "tout", "gauche", "droite"];
+  const id = (new URLSearchParams(location.search).get("id") || "").replace(/[^a-z0-9]/gi, "");
+  const $ = s => document.getElementById(s), etat = $("etat"), detail = $("detail"), go = $("go");
+  const say = (a, b = "", col = "") => { etat.textContent = a; etat.style.color = col; detail.textContent = b; };
+  if (!id) { go.disabled = true; say("Scanne le QR code", "Sur l'autoradio : Bass Pilot → Le micro → Mesure iPhone.", "#ffc857"); return; }
+  const UP = "https://ntfy.sh/bpm" + id + "u", DOWN = "https://ntfy.sh/bpm" + id + "d";
+  const send = m => fetch(UP, { method: "POST", body: m }).catch(() => {});
+
+  let ctx, an, fbuf, tbuf, phase = null, phaseAt = 0, acc = {}, clip = 0, es = null, timer = null, watchdog = null, wake = null;
+
+  function bands() {   // puissance par tiers d'octave (somme des cases de la FFT)
+    an.getFloatFrequencyData(fbuf);
+    const hz = ctx.sampleRate / an.fftSize, out = new Float64Array(MF.length);
+    for (let i = 0; i < MF.length; i++) {
+      const lo = MF[i] * Math.pow(2, -1 / 6), hi = MF[i] * Math.pow(2, 1 / 6);
+      let p = 0; for (let k = Math.max(1, Math.round(lo / hz)); k <= Math.round(hi / hz); k++) p += Math.pow(10, fbuf[k] / 10);
+      out[i] = p;
+    }
+    return out;
+  }
+  function tick() {
+    an.getFloatTimeDomainData(tbuf);
+    let pk = 0, rms = 0; for (const v of tbuf) { pk = Math.max(pk, Math.abs(v)); rms += v * v; }
+    rms = Math.sqrt(rms / tbuf.length);
+    $("niv").style.width = Math.max(0, Math.min(100, (20 * Math.log10(rms + 1e-9) + 70) * 1.6)) + "%";
+    if (!phase || performance.now() - phaseAt < 1200) return;   // on laisse le son s'installer
+    if (pk > 0.98 && phase !== "bruit") clip++;
+    const b = bands(), a = acc[phase] || (acc[phase] = { p: new Float64Array(MF.length), n: 0 });
+    for (let i = 0; i < MF.length; i++) a.p[i] += b[i];
+    a.n++;
+  }
+  const db = a => Array.from(a.p, v => Math.round(10 * Math.log10(v / a.n + 1e-20) * 10) / 10);
+
+  function finish() {
+    clearInterval(timer); clearTimeout(watchdog); if (es) es.close();
+    for (const p of PHASES) if (!acc[p] || acc[p].n < 3) { say("Mesure incomplète", "Le signal de l'autoradio n'est pas arrivé. Vérifie sa connexion internet et recommence.", "#ff5c5c"); go.disabled = false; return; }
+    const r = { n: db(acc.bruit), t: db(acc.tout), l: db(acc.gauche), r: db(acc.droite), clip: clip > 5 };
+    send("res " + JSON.stringify(r));
+    if (r.clip) say("Trop fort", "Le micro de l'iPhone a saturé : baisse le volume de 3 crans et recommence.", "#ff5c5c");
+    else say("✓ Mesure envoyée", "L'autoradio applique la correction.", "#39ff7a");
+    draw(r); go.disabled = false; go.textContent = "🎤  Refaire une mesure";
+    if (wake) wake.release().catch(() => {});
+  }
+  function draw(r) {
+    $("res").style.display = "block";
+    const c = $("graph"), g = c.getContext("2d"), W = c.width, H = c.height;
+    g.clearRect(0, 0, W, H);
+    const ref = r.t.slice(9, 22).reduce((a, b) => a + b, 0) / 13, y = v => H / 2 - (v - ref) * 7, x = i => 20 + i * (W - 40) / (MF.length - 1);
+    g.strokeStyle = "#2a323c"; g.lineWidth = 1; for (const d of [-12, -6, 0, 6, 12]) { g.beginPath(); g.moveTo(0, y(ref + d)); g.lineTo(W, y(ref + d)); g.stroke(); }
+    const line = (arr, col, w) => { g.strokeStyle = col; g.lineWidth = w; g.beginPath(); arr.forEach((v, i) => i ? g.lineTo(x(i), y(v)) : g.moveTo(x(i), y(v))); g.stroke(); };
+    line(r.n, "#556070", 2); line(r.t, "#00e5ff", 4);
+    g.fillStyle = "#b8c3cf"; g.font = "20px -apple-system,sans-serif";
+    [[0, "30 Hz"], [9, "250"], [15, "1 k"], [21, "4 k"], [27, "16 k"]].forEach(([i, t]) => g.fillText(t, Math.min(W - 60, x(i) - 14), H - 6));
+  }
+
+  go.onclick = async () => {
+    go.disabled = true; acc = {}; clip = 0; phase = null;
+    document.querySelectorAll(".steps div").forEach(d => d.className = "");
+    say("Micro…", "Autorise le micro si l'iPhone le demande.");
+    try {
+      const st = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+      ctx = ctx || new (window.AudioContext || window.webkitAudioContext)();
+      await ctx.resume();
+      an = ctx.createAnalyser(); an.fftSize = 16384; an.smoothingTimeConstant = 0;
+      fbuf = new Float32Array(an.frequencyBinCount); tbuf = new Float32Array(2048);
+      ctx.createMediaStreamSource(st).connect(an);
+    } catch (e) { say("Micro refusé", "Réglages de l'iPhone → Safari → Micro → Autoriser, puis recommence.", "#ff5c5c"); go.disabled = false; return; }
+    try { wake = await navigator.wakeLock.request("screen"); } catch (e) {}
+    es = new EventSource(DOWN + "/sse");
+    es.onmessage = ev => {
+      let m; try { m = JSON.parse(ev.data).message; } catch (e) { return; }
+      if (PHASES.includes(m)) {
+        document.querySelectorAll(".steps div").forEach(d => { d.className = d.dataset.p === m ? "on" : PHASES.indexOf(d.dataset.p) < PHASES.indexOf(m) ? "ok" : ""; });
+        phase = m; phaseAt = performance.now();
+        say({ bruit: "Silence…", tout: "Les deux côtés…", gauche: "Côté gauche…", droite: "Côté droit…" }[m], "Ne bouge plus.", "#00e5ff");
+      } else if (m === "fin") { phase = null; finish(); }
+      else if (m === "occupe") { say("Autoradio occupé", "Ferme la mesure en cours sur l'autoradio et recommence.", "#ff5c5c"); go.disabled = false; es.close(); clearInterval(timer); }
+    };
+    es.onopen = () => { send("pret"); say("Connecté", "L'autoradio va jouer le son de test…", "#00e5ff"); };
+    timer = setInterval(tick, 100);
+    setTimeout(() => { if (phase) { phase = null; finish(); } }, 60000);   // le « fin » s'est perdu : on termine quand même
+    watchdog = setTimeout(() => { if (!acc.tout) { es.close(); clearInterval(timer); say("Pas de réponse de l'autoradio", "Vérifie que l'écran « Mesure iPhone » est ouvert et que l'autoradio a internet.", "#ff5c5c"); go.disabled = false; } }, 20000);
+  };
+})();
+</script>
+</body>
+</html>
