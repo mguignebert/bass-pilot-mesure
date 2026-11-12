@@ -137,6 +137,7 @@
     setTimeout(() => { if (phase) { phase = null; finish(); } }, 60000);   // le « fin » s'est perdu : on termine quand même
     watchdog = setTimeout(() => { if (!acc.tout) { es.close(); clearInterval(timer); say("Pas de réponse de l'autoradio", "Vérifie que l'écran « Mesure iPhone » est ouvert et que l'autoradio a internet.", "#ff5c5c"); go.disabled = false; } }, 20000);
   };
+  if (new URLSearchParams(location.search).has("essai")) go.click();   // test sur PC (faux micro)
 })();
 </script>
 </body>
