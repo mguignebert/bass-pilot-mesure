@@ -114,6 +114,14 @@
     UP = SRV + "/bpm" + id + "u"; DOWN = SRV + "/bpm" + id + "d";
     return SRV;
   }
+  async function sendSure(m) {   // v10 : le résultat est envoyé par le 1er service qui l'accepte
+    const list = [SRV].concat(RELAIS.filter(x => x !== SRV));
+    for (const srv of list) {
+      try { const r = await fetch(srv + "/bpm" + id + "u", { method: "POST", body: m }); if (r.ok) return true; } catch (e) {}
+    }
+    say("Résultat non envoyé", "Les services d'échange refusent pour l'instant : attends 5 minutes et recommence.", "#ff5c5c");
+    return false;
+  }
   const send = async m => { await relais(); return fetch(UP, { method: "POST", body: m }).catch(() => {}); };
 
   let frames = null, gmax = null, ctx, an, fbuf, tbuf, phase = null, phaseAt = 0, acc = {}, clip = 0, es = null, timer = null, watchdog = null, wake = null;
@@ -195,7 +203,7 @@
         r.g = 1;
       }
     }
-    send("res " + JSON.stringify(r));
+    sendSure("res " + JSON.stringify(r));
     if (r.clip) say("Trop fort", "Le micro de l'iPhone a saturé : baisse le volume de 3 crans et recommence.", "#ff5c5c");
     else say("✓ Mesure envoyée", "L'autoradio applique la correction.", "#39ff7a");
     draw(r); go.disabled = false; go.textContent = "🎤  Refaire une mesure";
@@ -291,49 +299,42 @@
       ctx.createMediaStreamSource(st).connect(an);
     } catch (e) { say("Micro refusé", "Réglages de l'iPhone → Safari → Micro → Autoriser, puis recommence.", "#ff5c5c"); go.disabled = false; return; }
     try { wake = await navigator.wakeLock.request("screen"); } catch (e) {}
-    // v2 (13/11) : on interroge ntfy toutes les 0,7 s (au lieu d'une connexion continue, peu fiable sur iPhone),
-    // avec l'identifiant du dernier message comme repère ; « prêt » est renvoyé si l'autoradio ne répond pas
-    let cursor = "all", polling = true, pretAt = 0, primed = false;
-    const abort = new AbortController();
-    es = { close() { polling = false; abort.abort(); } };
-    const onMsg = m => {
-      if (PHASES.includes(m)) {
-        document.querySelectorAll(".steps div").forEach(d => { d.className = d.dataset.p === m ? "on" : PHASES.indexOf(d.dataset.p) < PHASES.indexOf(m) ? "ok" : ""; });
-        phase = m; phaseAt = performance.now();
-        say({ bruit: "Silence…", tout: "Les deux côtés…", gauche: "Côté gauche…", droite: "Côté droit…" }[m], "Ne bouge plus.", "#00e5ff");
-      } else if (m === "grave") { phase = "grave"; phaseAt = performance.now(); gmax = null; say("Notes graves…", "Ne bouge plus.", "#00e5ff"); }
-      else if (m === "fin") { phase = null; finish(); }
-      else if (m === "occupe") { say("Autoradio occupé", "Ferme la mesure en cours sur l'autoradio et recommence.", "#ff5c5c"); go.disabled = false; es.close(); clearInterval(timer); }
-    };
-    // v6 (13/11) : retour à l'interrogation régulière côté iPhone (Safari retient les données d'une connexion continue :
-    // « pas de réponse de l'autoradio »), mais 1 fois par seconde et seulement pendant la mesure (limite de ntfy.sh)
+    // v10 (13/11, le résultat n'arrivait plus : quota des services d'échange épuisé) : PLUS AUCUNE interrogation pendant la
+    // mesure. L'iPhone envoie « prêt », repère à l'oreille le début du son de test (T0), suit l'horaire fixe de l'autoradio
+    // (18.10) et envoie le résultat en essayant chaque service jusqu'à ce qu'un l'accepte.
     await relais();
-    const poll = async () => {
-      if (!polling) return;
-      try {
-        const txt = await (await fetch(DOWN + "/json?poll=1&since=" + cursor, { cache: "no-store" })).text();
-        for (const l of txt.split(/\r?\n/)) {
-          if (!l.trim()) continue;
-          const o = JSON.parse(l); if (o.id) cursor = o.id;
-          if (primed && o.event === "message") onMsg(o.message);
+    let polling = true, T0 = null, pretAt = Date.now(), tries = 1, relIdx = Math.max(0, RELAIS.indexOf(SRV));
+    es = { close() { polling = false; } };
+    frames = []; phase = null;
+    send("pret");
+    say("Connecté", "L'autoradio va jouer le son de test…", "#00e5ff");
+    const STEPS = [[0, "tout", "Les deux côtés…"], [9000, "gauche", "Côté gauche…"], [16000, "droite", "Côté droit…"], [23300, null, "Notes graves…"]];
+    const watch = setInterval(() => {
+      if (!polling) { clearInterval(watch); return; }
+      if (!T0) {
+        const F = frames || [];
+        if (F.length > 25) {
+          const P = F.slice(-21).map(f => { let q = 0; for (let i = 7; i <= 25; i++) q += f.b[i]; return 10 * Math.log10(q + 1e-20); });
+          const a = P.slice(15).reduce((x, y) => x + y, 0) / 6, bb = P.slice(0, 15).reduce((x, y) => x + y, 0) / 15;
+          const pre = P.slice(0, 15), calme = Math.max(...pre) - Math.min(...pre) < 6;   // avant : un vrai silence (pas de la musique)
+          if (a - bb >= 8 && calme) T0 = F[F.length - 6].t;
         }
-        if (!primed) { primed = true; frames = []; send("pret"); pretAt = Date.now(); say("Connecté", "L'autoradio va jouer le son de test…", "#00e5ff"); }
-      } catch (e) { detail.textContent = "Connexion internet de l'iPhone…"; }
-      setTimeout(poll, 1000);
-    };
-    poll();
-    const relance = setInterval(() => {   // l'autoradio n'a pas réagi : on renvoie « prêt » (2 fois au plus)
-      if (!polling || phase || acc.tout || !primed) { if (phase || acc.tout || !polling) clearInterval(relance); return; }
-      if (Date.now() - pretAt > 8000) { send("pret"); pretAt = Date.now(); detail.textContent = "Je relance l'autoradio…"; }
-    }, 2000);
+        if (!T0 && Date.now() - pretAt > 12000) {
+          if (tries >= 4) { polling = false; clearInterval(timer); clearInterval(watch); say("Pas de son de l'autoradio", "Vérifie que l'écran « Mesure iPhone » est ouvert et que l'autoradio a internet, puis recommence.", "#ff5c5c"); go.disabled = false; return; }
+          relIdx = (relIdx + 1) % RELAIS.length;   // on relance par un autre service (l'autoradio écoute sur tous)
+          fetch(RELAIS[relIdx] + "/bpm" + id + "u", { method: "POST", body: "pret" }).catch(() => {});
+          tries++; pretAt = Date.now(); detail.textContent = "Je relance l'autoradio (essai " + tries + ")…";
+        }
+        if (Date.now() - pretAt > 1500) { document.querySelectorAll(".steps div").forEach(d => d.className = d.dataset.p === "bruit" ? "on" : ""); say("Silence…", "Ne bouge plus.", "#00e5ff"); }
+        return;
+      }
+      const d = performance.now() - T0;
+      let cur = STEPS[0]; for (const st of STEPS) if (d >= st[0]) cur = st;
+      document.querySelectorAll(".steps div").forEach(x => { const i = PHASES.indexOf(x.dataset.p), j = cur[1] ? PHASES.indexOf(cur[1]) : 4; x.className = i === j ? "on" : i < j ? "ok" : ""; });
+      say(cur[2], "Ne bouge plus.", "#00e5ff");
+      if (d >= 39000) { clearInterval(watch); polling = false; finish(); }
+    }, 300);
     timer = setInterval(tick, 100);
-    setTimeout(() => { if (polling) { phase = null; finish(); } }, 75000);   // le « fin » s'est perdu : on termine quand même
-    const heard = () => {   // le son de test a-t-il commencé ? (même si les messages sont en retard)
-      if (!frames || frames.length < 30) return false;
-      const P = frames.map(f => { let p = 0; for (let i = 7; i <= 25; i++) p += f.b[i]; return 10 * Math.log10(p + 1e-20); });
-      return Math.max(...P.slice(-20)) - Math.min(...P) > 10;
-    };
-    watchdog = setTimeout(() => { if (!acc.tout && !phase && !heard()) { es.close(); clearInterval(timer); say("Pas de réponse de l'autoradio", "Vérifie que l'écran « Mesure iPhone » est ouvert et que l'autoradio a internet.", "#ff5c5c"); go.disabled = false; } }, 30000);
   };
   if (new URLSearchParams(location.search).has("essai")) go.click();   // test sur PC (faux micro)
 })();
