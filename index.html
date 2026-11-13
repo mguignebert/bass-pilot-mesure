@@ -116,7 +116,7 @@
   }
   const send = async m => { await relais(); return fetch(UP, { method: "POST", body: m }).catch(() => {}); };
 
-  let gmax = null, ctx, an, fbuf, tbuf, phase = null, phaseAt = 0, acc = {}, clip = 0, es = null, timer = null, watchdog = null, wake = null;
+  let frames = null, gmax = null, ctx, an, fbuf, tbuf, phase = null, phaseAt = 0, acc = {}, clip = 0, es = null, timer = null, watchdog = null, wake = null;
 
   function bands() {   // puissance par tiers d'octave (somme des cases de la FFT)
     an.getFloatFrequencyData(fbuf);
@@ -133,6 +133,7 @@
     let pk = 0, rms = 0; for (const v of tbuf) { pk = Math.max(pk, Math.abs(v)); rms += v * v; }
     rms = Math.sqrt(rms / tbuf.length);
     $("niv").style.width = Math.max(0, Math.min(100, (20 * Math.log10(rms + 1e-9) + 70) * 1.6)) + "%";
+    if (frames && frames.length < 1200) frames.push({ t: performance.now(), b: bands(), pk });   // v9 : tout est enregistré
     if (phase === "grave") {   // v8 : notes pures du grave : on garde le plus fort entendu dans chaque bande (moteur allumé)
       const b = bands(); gmax = gmax || new Float64Array(8);
       for (let i = 0; i < 8; i++) gmax[i] = Math.max(gmax[i], b[i]);
@@ -150,8 +151,35 @@
   }
   const db = a => Array.from(a.p, v => Math.round(10 * Math.log10(v / a.n + 1e-20) * 10) / 10);
 
+  // v9 (13/11, « mesure incomplète ») : l'autoradio (18.10) suit un horaire FIXE ; on retrouve à l'oreille le début du
+  // bruit rose (T0 = la plus forte montée du niveau) et on découpe les étapes à partir de là, sans dépendre des messages
+  function segment() {
+    const F = frames; if (!F || F.length < 250) return null;
+    const P = F.map(f => { let p = 0; for (let i = 7; i <= 25; i++) p += f.b[i]; return 10 * Math.log10(p + 1e-20); });
+    let best = -1, i0 = -1;
+    for (let i = 15; i < P.length - 6; i++) {
+      let a = 0, b = 0; for (let k = 0; k < 6; k++) a += P[i + k]; for (let k = 1; k <= 15; k++) b += P[i - k];
+      const rise = a / 6 - b / 15; if (rise > best) { best = rise; i0 = i; }
+    }
+    if (best < 8) return null;
+    const T0 = F[i0].t, W = { bruit: [-2600, -400], tout: [1000, 8500], gauche: [9700, 15500], droite: [16700, 22500] };
+    const out = {}; let cl = 0;
+    for (const k in W) {
+      const a = { p: new Float64Array(MF.length), n: 0 };
+      for (const f of F) { const d = f.t - T0; if (d >= W[k][0] && d <= W[k][1]) { for (let i = 0; i < MF.length; i++) a.p[i] += f.b[i]; a.n++; if (k !== "bruit" && f.pk > 0.98) cl++; } }
+      if (a.n < 3) return null;
+      out[k] = a;
+    }
+    let gm = null, ng = 0;
+    for (const f of F) { const d = f.t - T0; if (d >= 23300 && d <= 38500) { gm = gm || new Float64Array(8); for (let i = 0; i < 8; i++) gm[i] = Math.max(gm[i], f.b[i]); ng++; } }
+    return { acc: out, gmax: ng >= 5 ? gm : null, clip: cl, rise: best };
+  }
+
   function finish() {
     clearInterval(timer); clearTimeout(watchdog); if (es) es.close();
+    const seg = segment();
+    if (seg) { acc = seg.acc; gmax = seg.gmax; clip = seg.clip; }
+    frames = null;
     for (const p of PHASES) if (!acc[p] || acc[p].n < 3) { say("Mesure incomplète", "Le signal de l'autoradio n'est pas arrivé. Vérifie sa connexion internet et recommence.", "#ff5c5c"); go.disabled = false; return; }
     const r = { n: db(acc.bruit), t: db(acc.tout), l: db(acc.gauche), r: db(acc.droite), clip: clip > 5 };
     if (gmax) {   // grave mesuré en notes pures, recalé sur le bruit rose là où les deux sont fiables (100-160 Hz)
@@ -289,7 +317,7 @@
           const o = JSON.parse(l); if (o.id) cursor = o.id;
           if (primed && o.event === "message") onMsg(o.message);
         }
-        if (!primed) { primed = true; send("pret"); pretAt = Date.now(); say("Connecté", "L'autoradio va jouer le son de test…", "#00e5ff"); }
+        if (!primed) { primed = true; frames = []; send("pret"); pretAt = Date.now(); say("Connecté", "L'autoradio va jouer le son de test…", "#00e5ff"); }
       } catch (e) { detail.textContent = "Connexion internet de l'iPhone…"; }
       setTimeout(poll, 1000);
     };
@@ -299,8 +327,13 @@
       if (Date.now() - pretAt > 8000) { send("pret"); pretAt = Date.now(); detail.textContent = "Je relance l'autoradio…"; }
     }, 2000);
     timer = setInterval(tick, 100);
-    setTimeout(() => { if (phase) { phase = null; finish(); } }, 60000);   // le « fin » s'est perdu : on termine quand même
-    watchdog = setTimeout(() => { if (!acc.tout && !phase) { es.close(); clearInterval(timer); say("Pas de réponse de l'autoradio", "Vérifie que l'écran « Mesure iPhone » est ouvert et que l'autoradio a internet.", "#ff5c5c"); go.disabled = false; } }, 30000);
+    setTimeout(() => { if (polling) { phase = null; finish(); } }, 75000);   // le « fin » s'est perdu : on termine quand même
+    const heard = () => {   // le son de test a-t-il commencé ? (même si les messages sont en retard)
+      if (!frames || frames.length < 30) return false;
+      const P = frames.map(f => { let p = 0; for (let i = 7; i <= 25; i++) p += f.b[i]; return 10 * Math.log10(p + 1e-20); });
+      return Math.max(...P.slice(-20)) - Math.min(...P) > 10;
+    };
+    watchdog = setTimeout(() => { if (!acc.tout && !phase && !heard()) { es.close(); clearInterval(timer); say("Pas de réponse de l'autoradio", "Vérifie que l'écran « Mesure iPhone » est ouvert et que l'autoradio a internet.", "#ff5c5c"); go.disabled = false; } }, 30000);
   };
   if (new URLSearchParams(location.search).has("essai")) go.click();   // test sur PC (faux micro)
 })();
