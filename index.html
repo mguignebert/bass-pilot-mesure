@@ -122,9 +122,11 @@
       ctx.createMediaStreamSource(st).connect(an);
     } catch (e) { say("Micro refusé", "Réglages de l'iPhone → Safari → Micro → Autoriser, puis recommence.", "#ff5c5c"); go.disabled = false; return; }
     try { wake = await navigator.wakeLock.request("screen"); } catch (e) {}
-    es = new EventSource(DOWN + "/sse");
-    es.onmessage = ev => {
-      let m; try { m = JSON.parse(ev.data).message; } catch (e) { return; }
+    // v2 (13/11) : on interroge ntfy toutes les 0,7 s (au lieu d'une connexion continue, peu fiable sur iPhone),
+    // avec l'identifiant du dernier message comme repère ; « prêt » est renvoyé si l'autoradio ne répond pas
+    let cursor = "all", polling = true, pretAt = 0, primed = false;
+    es = { close() { polling = false; } };
+    const onMsg = m => {
       if (PHASES.includes(m)) {
         document.querySelectorAll(".steps div").forEach(d => { d.className = d.dataset.p === m ? "on" : PHASES.indexOf(d.dataset.p) < PHASES.indexOf(m) ? "ok" : ""; });
         phase = m; phaseAt = performance.now();
@@ -132,10 +134,24 @@
       } else if (m === "fin") { phase = null; finish(); }
       else if (m === "occupe") { say("Autoradio occupé", "Ferme la mesure en cours sur l'autoradio et recommence.", "#ff5c5c"); go.disabled = false; es.close(); clearInterval(timer); }
     };
-    es.onopen = () => { send("pret"); say("Connecté", "L'autoradio va jouer le son de test…", "#00e5ff"); };
+    const poll = async () => {
+      if (!polling) return;
+      try {
+        const txt = await (await fetch(DOWN + "/json?poll=1&since=" + cursor, { cache: "no-store" })).text();
+        for (const l of txt.split("\n")) {
+          if (!l.trim()) continue;
+          const o = JSON.parse(l); if (o.id) cursor = o.id;
+          if (primed && o.event === "message") onMsg(o.message);
+        }
+        if (!primed) { primed = true; send("pret"); pretAt = Date.now(); say("Connecté", "L'autoradio va jouer le son de test…", "#00e5ff"); }
+        else if (!phase && !acc.tout && Date.now() - pretAt > 7000) { send("pret"); pretAt = Date.now(); detail.textContent = "Je relance l'autoradio…"; }
+      } catch (e) { detail.textContent = "Connexion internet de l'iPhone…"; }
+      setTimeout(poll, 700);
+    };
+    poll();
     timer = setInterval(tick, 100);
     setTimeout(() => { if (phase) { phase = null; finish(); } }, 60000);   // le « fin » s'est perdu : on termine quand même
-    watchdog = setTimeout(() => { if (!acc.tout) { es.close(); clearInterval(timer); say("Pas de réponse de l'autoradio", "Vérifie que l'écran « Mesure iPhone » est ouvert et que l'autoradio a internet.", "#ff5c5c"); go.disabled = false; } }, 20000);
+    watchdog = setTimeout(() => { if (!acc.tout && !phase) { es.close(); clearInterval(timer); say("Pas de réponse de l'autoradio", "Vérifie que l'écran « Mesure iPhone » est ouvert et que l'autoradio a internet.", "#ff5c5c"); go.disabled = false; } }, 30000);
   };
   if (new URLSearchParams(location.search).has("essai")) go.click();   // test sur PC (faux micro)
 })();
