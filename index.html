@@ -116,7 +116,7 @@
   }
   const send = async m => { await relais(); return fetch(UP, { method: "POST", body: m }).catch(() => {}); };
 
-  let ctx, an, fbuf, tbuf, phase = null, phaseAt = 0, acc = {}, clip = 0, es = null, timer = null, watchdog = null, wake = null;
+  let gmax = null, ctx, an, fbuf, tbuf, phase = null, phaseAt = 0, acc = {}, clip = 0, es = null, timer = null, watchdog = null, wake = null;
 
   function bands() {   // puissance par tiers d'octave (somme des cases de la FFT)
     an.getFloatFrequencyData(fbuf);
@@ -133,6 +133,11 @@
     let pk = 0, rms = 0; for (const v of tbuf) { pk = Math.max(pk, Math.abs(v)); rms += v * v; }
     rms = Math.sqrt(rms / tbuf.length);
     $("niv").style.width = Math.max(0, Math.min(100, (20 * Math.log10(rms + 1e-9) + 70) * 1.6)) + "%";
+    if (phase === "grave") {   // v8 : notes pures du grave : on garde le plus fort entendu dans chaque bande (moteur allumé)
+      const b = bands(); gmax = gmax || new Float64Array(8);
+      for (let i = 0; i < 8; i++) gmax[i] = Math.max(gmax[i], b[i]);
+      return;
+    }
     if (!phase || performance.now() - phaseAt < 1200) return;   // on laisse le son s'installer
     // v4 (13/11, 1re vraie mesure) : le « silence » contenait déjà un peu du son de test (le message suivant arrive en retard).
     // Chaque étape n'est donc écoutée que pendant une fenêtre sûre : silence 1,2-2,4 s, les deux 1,2-7 s, gauche / droite 1,2-5,3 s
@@ -149,6 +154,19 @@
     clearInterval(timer); clearTimeout(watchdog); if (es) es.close();
     for (const p of PHASES) if (!acc[p] || acc[p].n < 3) { say("Mesure incomplète", "Le signal de l'autoradio n'est pas arrivé. Vérifie sa connexion internet et recommence.", "#ff5c5c"); go.disabled = false; return; }
     const r = { n: db(acc.bruit), t: db(acc.tout), l: db(acc.gauche), r: db(acc.droite), clip: clip > 5 };
+    if (gmax) {   // grave mesuré en notes pures, recalé sur le bruit rose là où les deux sont fiables (100-160 Hz)
+      const g = Array.from(gmax, v => 10 * Math.log10(v + 1e-20));
+      let off = 0, k = 0;
+      for (let i = 5; i < 8; i++) if (r.t[i] - r.n[i] >= 12 && g[i] - r.n[i] >= 12) { off += r.t[i] - g[i]; k++; }
+      if (k) {
+        off /= k;
+        for (let i = 0; i < 8; i++) {
+          const v = Math.round((g[i] + off) * 10) / 10;
+          if (r.t[i] - r.n[i] < 10 && v - r.n[i] >= 10) { r.t[i] = v; r.l[i] = r.r[i] = Math.round((v - 3) * 10) / 10; }
+        }
+        r.g = 1;
+      }
+    }
     send("res " + JSON.stringify(r));
     if (r.clip) say("Trop fort", "Le micro de l'iPhone a saturé : baisse le volume de 3 crans et recommence.", "#ff5c5c");
     else say("✓ Mesure envoyée", "L'autoradio applique la correction.", "#39ff7a");
@@ -233,7 +251,7 @@
   $("sonoStop").onclick = () => { clearInterval(sono); sono = null; $("spl").textContent = "— dB"; $("spl").style.color = ""; send("spl stop"); };
 
   go.onclick = async () => {
-    go.disabled = true; acc = {}; clip = 0; phase = null;
+    go.disabled = true; acc = {}; clip = 0; phase = null; gmax = null;
     document.querySelectorAll(".steps div").forEach(d => d.className = "");
     say("Micro…", "Autorise le micro si l'iPhone le demande.");
     try {
@@ -255,7 +273,8 @@
         document.querySelectorAll(".steps div").forEach(d => { d.className = d.dataset.p === m ? "on" : PHASES.indexOf(d.dataset.p) < PHASES.indexOf(m) ? "ok" : ""; });
         phase = m; phaseAt = performance.now();
         say({ bruit: "Silence…", tout: "Les deux côtés…", gauche: "Côté gauche…", droite: "Côté droit…" }[m], "Ne bouge plus.", "#00e5ff");
-      } else if (m === "fin") { phase = null; finish(); }
+      } else if (m === "grave") { phase = "grave"; phaseAt = performance.now(); gmax = null; say("Notes graves…", "Ne bouge plus.", "#00e5ff"); }
+      else if (m === "fin") { phase = null; finish(); }
       else if (m === "occupe") { say("Autoradio occupé", "Ferme la mesure en cours sur l'autoradio et recommence.", "#ff5c5c"); go.disabled = false; es.close(); clearInterval(timer); }
     };
     // v6 (13/11) : retour à l'interrogation régulière côté iPhone (Safari retient les données d'une connexion continue :
