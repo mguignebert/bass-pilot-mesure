@@ -161,21 +161,27 @@
 
   // v9 (13/11, « mesure incomplète ») : l'autoradio (18.10) suit un horaire FIXE ; on retrouve à l'oreille le début du
   // bruit rose (T0 = la plus forte montée du niveau) et on découpe les étapes à partir de là, sans dépendre des messages
+  let T0live = null, diag = "";
   function segment() {
-    const F = frames; if (!F || F.length < 250) return null;
+    const F = frames; diag = "enregistrement " + (F ? F.length : 0) + " pas";
+    if (!F || F.length < 150) return null;
     const P = F.map(f => { let p = 0; for (let i = 7; i <= 25; i++) p += f.b[i]; return 10 * Math.log10(p + 1e-20); });
+    // v11 : le PREMIER départ après un vrai silence (et non la plus forte montée : la musique qui repart à la fin la battait)
     let best = -1, i0 = -1;
     for (let i = 15; i < P.length - 6; i++) {
-      let a = 0, b = 0; for (let k = 0; k < 6; k++) a += P[i + k]; for (let k = 1; k <= 15; k++) b += P[i - k];
-      const rise = a / 6 - b / 15; if (rise > best) { best = rise; i0 = i; }
+      let a = 0, b = 0, mx = -1e9, mn = 1e9; for (let k = 0; k < 6; k++) a += P[i + k];
+      for (let k = 1; k <= 15; k++) { b += P[i - k]; mx = Math.max(mx, P[i - k]); mn = Math.min(mn, P[i - k]); }
+      const rise = a / 6 - b / 15; if (rise > best) best = rise;
+      if (rise >= 8 && mx - mn < 6) { i0 = i; best = rise; break; }
     }
-    if (best < 8) return null;
-    const T0 = F[i0].t, W = { bruit: [-2600, -400], tout: [1000, 8500], gauche: [9700, 15500], droite: [16700, 22500] };
+    diag += ", montée " + best.toFixed(0) + " dB";
+    if (i0 < 0 && !T0live) return null;
+    const T0 = T0live || F[i0].t, W = { bruit: [-2600, -400], tout: [1000, 8500], gauche: [9700, 15500], droite: [16700, 22500] };
     const out = {}; let cl = 0;
     for (const k in W) {
       const a = { p: new Float64Array(MF.length), n: 0 };
       for (const f of F) { const d = f.t - T0; if (d >= W[k][0] && d <= W[k][1]) { for (let i = 0; i < MF.length; i++) a.p[i] += f.b[i]; a.n++; if (k !== "bruit" && f.pk > 0.98) cl++; } }
-      if (a.n < 3) return null;
+      if (a.n < 2) { diag += ", étape « " + k + " » vide"; return null; }
       out[k] = a;
     }
     let gm = null, ng = 0;
@@ -188,7 +194,7 @@
     const seg = segment();
     if (seg) { acc = seg.acc; gmax = seg.gmax; clip = seg.clip; }
     frames = null;
-    for (const p of PHASES) if (!acc[p] || acc[p].n < 3) { say("Mesure incomplète", "Le signal de l'autoradio n'est pas arrivé. Vérifie sa connexion internet et recommence.", "#ff5c5c"); go.disabled = false; return; }
+    for (const p of PHASES) if (!acc[p] || acc[p].n < 3) { say("Mesure incomplète", "Je n'ai pas reconnu le son de test (" + diag + "). Coupe la musique, monte le volume de 2 crans et recommence.", "#ff5c5c"); go.disabled = false; return; }
     const r = { n: db(acc.bruit), t: db(acc.tout), l: db(acc.gauche), r: db(acc.droite), clip: clip > 5 };
     if (gmax) {   // grave mesuré en notes pures, recalé sur le bruit rose là où les deux sont fiables (100-160 Hz)
       const g = Array.from(gmax, v => 10 * Math.log10(v + 1e-20));
@@ -305,7 +311,7 @@
     await relais();
     let polling = true, T0 = null, pretAt = Date.now(), tries = 1, relIdx = Math.max(0, RELAIS.indexOf(SRV));
     es = { close() { polling = false; } };
-    frames = []; phase = null;
+    frames = []; phase = null; T0live = null;
     send("pret");
     say("Connecté", "L'autoradio va jouer le son de test…", "#00e5ff");
     const STEPS = [[0, "tout", "Les deux côtés…"], [9000, "gauche", "Côté gauche…"], [16000, "droite", "Côté droit…"], [23300, null, "Notes graves…"]];
@@ -317,7 +323,7 @@
           const P = F.slice(-21).map(f => { let q = 0; for (let i = 7; i <= 25; i++) q += f.b[i]; return 10 * Math.log10(q + 1e-20); });
           const a = P.slice(15).reduce((x, y) => x + y, 0) / 6, bb = P.slice(0, 15).reduce((x, y) => x + y, 0) / 15;
           const pre = P.slice(0, 15), calme = Math.max(...pre) - Math.min(...pre) < 6;   // avant : un vrai silence (pas de la musique)
-          if (a - bb >= 8 && calme) T0 = F[F.length - 6].t;
+          if (a - bb >= 8 && calme) T0 = T0live = F[F.length - 6].t;
         }
         if (!T0 && Date.now() - pretAt > 12000) {
           if (tries >= 4) { polling = false; clearInterval(timer); clearInterval(watch); say("Pas de son de l'autoradio", "Vérifie que l'écran « Mesure iPhone » est ouvert et que l'autoradio a internet, puis recommence.", "#ff5c5c"); go.disabled = false; return; }
