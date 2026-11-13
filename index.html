@@ -27,7 +27,7 @@
 </head>
 <body>
 <h1>Bass Pilot <span>Mesure</span></h1>
-<div class="mute">L'iPhone écoute ta Clio à ta place et règle le son de l'autoradio.</div>
+<div class="mute">L'iPhone écoute ta Clio à ta place et règle le son de l'autoradio. <span style="opacity:.6">(version 12)</span></div>
 
 <div class="card" id="aide">
   <b>Avant de lancer</b>
@@ -89,6 +89,15 @@
 </style>
 
 <script>
+// v12 : la page se met à jour toute seule (GitHub et Safari gardaient l'ancienne version jusqu'à 10 min)
+const PAGE_VERSION = "12";
+(async () => {
+  try {
+    const t = await (await fetch(location.pathname + "?nocache=" + Date.now(), { cache: "no-store" })).text();
+    const m = t.match(/const PAGE_VERSION = "(\d+)"/);
+    if (m && m[1] !== PAGE_VERSION) { const u = new URL(location.href); u.searchParams.set("v", m[1] + "-" + Date.now()); location.replace(u.toString()); }
+  } catch (e) {}
+})();
 (() => {
   const MF = [31.5,40,50,63,80,100,125,160,200,250,315,400,500,630,800,1000,1250,1600,2000,2500,3150,4000,5000,6300,8000,10000,12500,16000];
   const PHASES = ["bruit", "tout", "gauche", "droite"];
