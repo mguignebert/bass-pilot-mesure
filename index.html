@@ -52,6 +52,14 @@
 </div>
 
 <div class="card">
+  <b>📢 Sonomètre</b>
+  <div class="mute">Le micro de l'iPhone mesure le niveau sonore à ta place ; l'autoradio l'affiche aussi (écran Mesure iPhone). Estimation à ± 3 dB environ.</div>
+  <div class="row3"><button class="sb" id="sonoGo">▶  Démarrer</button><button class="sb" id="sonoRaz">↺  Remettre le record à zéro</button><button class="sb" id="sonoStop">■  Arrêter</button></div>
+  <div id="spl" class="big">— dB</div>
+  <div id="spla" class="mute" style="text-align:center"></div>
+</div>
+
+<div class="card">
   <b>🔧 Réglage des amplis</b>
   <ol class="mute">
     <li>Mets le volume de l'autoradio à ton volume <b>le plus fort habituel</b> (par exemple 28).</li>
@@ -76,6 +84,7 @@
   .row3 { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin-top:10px; } .r4 { grid-template-columns:repeat(4,minmax(0,1fr)); }
   .b2 { padding:12px 4px; font-size:14px; white-space:normal; line-height:1.2; border-radius:12px; background:#24303c; color:#fff; } .b2.on { background:var(--acc); color:#04161a; }
   .b2.stop { margin-top:10px; background:#3a1f24; }
+  .sb { padding:12px 4px; font-size:14px; border-radius:12px; background:#24303c; color:#fff; white-space:normal; line-height:1.2; }
   .big { font:900 46px -apple-system,system-ui,sans-serif; text-align:center; margin:12px 0 2px; }
 </style>
 
@@ -184,6 +193,28 @@
     if (!thdTimer) thdTimer = setInterval(thdTick, 150);
   });
 
+  // ---------- v5 (13/11) : sonomètre avec le micro de l'iPhone (le micro de l'autoradio n'est pas fiable)
+  // Niveau calculé sur la FFT : sans pondération (comme les concours SPL, grave compris) et pondéré A (ce que perçoit l'oreille).
+  // iPhone, traitements du micro coupés : 0 dBFS ≈ 120 dB SPL (valeur typique, non étalonnée : ± 3 dB)
+  const SPL_OFF = 120;
+  let sono = null, rec = 0, lastSent = 0, splZs = -1;
+  const aW = f => { const f2 = f * f, r = (12194 ** 2 * f2 * f2) / ((f2 + 20.6 ** 2) * Math.sqrt((f2 + 107.7 ** 2) * (f2 + 737.9 ** 2)) * (f2 + 12194 ** 2)); return r * r * 1.2589; };   // +2 dB à 1 kHz → 0
+  function sonoTick() {
+    an.getFloatFrequencyData(fbuf);
+    const hz = ctx.sampleRate / an.fftSize; let z = 0, a = 0;
+    for (let k = Math.round(20 / hz); k < Math.min(fbuf.length, Math.round(20000 / hz)); k++) { const p = Math.pow(10, fbuf[k] / 10); z += p; a += p * aW(k * hz); }
+    const dz = 10 * Math.log10(z / 1.73 + 1e-20) + SPL_OFF, da = 10 * Math.log10(a / 1.73 + 1e-20) + SPL_OFF;   // 1,73 : largeur de la fenêtre de Blackman
+    splZs = splZs < 0 ? dz : splZs * 0.6 + dz * 0.4;
+    rec = Math.max(rec, splZs);
+    $("spl").textContent = Math.round(splZs) + " dB";
+    $("spl").style.color = splZs < 85 ? "#39ff7a" : splZs < 105 ? "#ffc857" : "#ff5c5c";
+    $("spla").textContent = "Oreille : " + Math.round(da) + " dB(A)  ·  record : " + Math.round(rec) + " dB" + (splZs >= 100 ? "  ·  ⚠️ fort pour les oreilles" : "");
+    if (Date.now() - lastSent > 3000) { lastSent = Date.now(); send("spl " + splZs.toFixed(1) + " " + rec.toFixed(1) + " " + da.toFixed(1)); }
+  }
+  $("sonoGo").onclick = async () => { if (!(await micOn())) return; if (!sono) sono = setInterval(sonoTick, 200); try { wake = await navigator.wakeLock.request("screen"); } catch (e) {} };
+  $("sonoRaz").onclick = () => { rec = 0; };
+  $("sonoStop").onclick = () => { clearInterval(sono); sono = null; $("spl").textContent = "— dB"; $("spl").style.color = ""; send("spl stop"); };
+
   go.onclick = async () => {
     go.disabled = true; acc = {}; clip = 0; phase = null;
     document.querySelectorAll(".steps div").forEach(d => d.className = "");
@@ -200,7 +231,8 @@
     // v2 (13/11) : on interroge ntfy toutes les 0,7 s (au lieu d'une connexion continue, peu fiable sur iPhone),
     // avec l'identifiant du dernier message comme repère ; « prêt » est renvoyé si l'autoradio ne répond pas
     let cursor = "all", polling = true, pretAt = 0, primed = false;
-    es = { close() { polling = false; } };
+    const abort = new AbortController();
+    es = { close() { polling = false; abort.abort(); } };
     const onMsg = m => {
       if (PHASES.includes(m)) {
         document.querySelectorAll(".steps div").forEach(d => { d.className = d.dataset.p === m ? "on" : PHASES.indexOf(d.dataset.p) < PHASES.indexOf(m) ? "ok" : ""; });
@@ -209,21 +241,34 @@
       } else if (m === "fin") { phase = null; finish(); }
       else if (m === "occupe") { say("Autoradio occupé", "Ferme la mesure en cours sur l'autoradio et recommence.", "#ff5c5c"); go.disabled = false; es.close(); clearInterval(timer); }
     };
-    const poll = async () => {
-      if (!polling) return;
-      try {
-        const txt = await (await fetch(DOWN + "/json?poll=1&since=" + cursor, { cache: "no-store" })).text();
-        for (const l of txt.split("\n")) {
-          if (!l.trim()) continue;
-          const o = JSON.parse(l); if (o.id) cursor = o.id;
-          if (primed && o.event === "message") onMsg(o.message);
-        }
-        if (!primed) { primed = true; send("pret"); pretAt = Date.now(); say("Connecté", "L'autoradio va jouer le son de test…", "#00e5ff"); }
-        else if (!phase && !acc.tout && Date.now() - pretAt > 7000) { send("pret"); pretAt = Date.now(); detail.textContent = "Je relance l'autoradio…"; }
-      } catch (e) { detail.textContent = "Connexion internet de l'iPhone…"; }
-      setTimeout(poll, 700);
+    // v5 : une seule connexion ouverte en continu (ntfy.sh limite à ~1 requête / 5 s) : 1 lecture pour le repère, puis le flux
+    const stream = async () => {
+      while (polling) {
+        try {
+          if (!primed) {   // repère : identifiant du dernier message (indépendant des horloges)
+            const txt = await (await fetch(DOWN + "/json?poll=1&since=all", { cache: "no-store" })).text();
+            for (const l of txt.split("\n")) { if (l.trim()) { const o = JSON.parse(l); if (o.id) cursor = o.id; } }
+          }
+          const rd = (await fetch(DOWN + "/json?since=" + cursor, { cache: "no-store", signal: abort.signal })).body.getReader(), dec = new TextDecoder();
+          let buf = "";
+          for (;;) {
+            const { value, done } = await rd.read(); if (done || !polling) break;
+            buf += dec.decode(value, { stream: true });
+            let i; while ((i = buf.indexOf("\n")) >= 0) {
+              const l = buf.slice(0, i); buf = buf.slice(i + 1); if (!l.trim()) continue;
+              const o = JSON.parse(l);
+              if (o.event === "open" && !primed) { primed = true; send("pret"); pretAt = Date.now(); say("Connecté", "L'autoradio va jouer le son de test…", "#00e5ff"); }
+              if (o.event === "message") { cursor = o.id; onMsg(o.message); }
+            }
+          }
+        } catch (e) { detail.textContent = "Connexion internet de l'iPhone…"; await new Promise(r => setTimeout(r, 3000)); }
+      }
     };
-    poll();
+    stream();
+    const relance = setInterval(() => {   // l'autoradio n'a pas réagi : on renvoie « prêt » (2 fois au plus)
+      if (!polling || phase || acc.tout || !primed) { if (phase || acc.tout || !polling) clearInterval(relance); return; }
+      if (Date.now() - pretAt > 8000) { send("pret"); pretAt = Date.now(); detail.textContent = "Je relance l'autoradio…"; }
+    }, 2000);
     timer = setInterval(tick, 100);
     setTimeout(() => { if (phase) { phase = null; finish(); } }, 60000);   // le « fin » s'est perdu : on termine quand même
     watchdog = setTimeout(() => { if (!acc.tout && !phase) { es.close(); clearInterval(timer); say("Pas de réponse de l'autoradio", "Vérifie que l'écran « Mesure iPhone » est ouvert et que l'autoradio a internet.", "#ff5c5c"); go.disabled = false; } }, 30000);
