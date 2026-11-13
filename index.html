@@ -27,7 +27,7 @@
 </head>
 <body>
 <h1>Bass Pilot <span>Mesure</span></h1>
-<div class="mute">L'iPhone écoute ta Clio à ta place et règle le son de l'autoradio. <span style="opacity:.6">(version 12)</span></div>
+<div class="mute">L'iPhone écoute ta Clio à ta place et règle le son de l'autoradio. <span style="opacity:.6">(version 13)</span></div>
 
 <div class="card" id="aide">
   <b>Avant de lancer</b>
@@ -48,7 +48,7 @@
 <div class="card" id="res" style="display:none">
   <b>Ta Clio telle qu'elle sonne</b>
   <canvas id="graph" width="700" height="340"></canvas>
-  <div class="mute">Grave à gauche, aigu à droite. La correction a été envoyée à l'autoradio.</div>
+  <div class="mute" id="legende">Grave à gauche, aigu à droite. La correction a été envoyée à l'autoradio.</div>
 </div>
 
 <div class="card">
@@ -90,7 +90,7 @@
 
 <script>
 // v12 : la page se met à jour toute seule (GitHub et Safari gardaient l'ancienne version jusqu'à 10 min)
-const PAGE_VERSION = "12";
+const PAGE_VERSION = "13";
 (async () => {
   try {
     const t = await (await fetch(location.pathname + "?nocache=" + Date.now(), { cache: "no-store" })).text();
@@ -198,6 +198,35 @@ const PAGE_VERSION = "12";
     return { acc: out, gmax: ng >= 5 ? gm : null, clip: cl, rise: best };
   }
 
+  let pass = 1, r1 = null;
+  function startPass2() {
+    pass = 2; acc = {}; clip = 0; gmax = null; phase = null; frames = []; T0live = null;
+    const t0 = performance.now(); let T0 = null;
+    timer = setInterval(tick, 100);
+    const STEPS = [[0, "tout", "Les deux côtés…"], [9000, "gauche", "Côté gauche…"], [16000, "droite", "Côté droit…"], [23300, null, "Notes graves…"]];
+    const w = setInterval(() => {
+      if (!T0) {
+        const F = frames || [];
+        if (F.length > 25) {
+          const P = F.slice(-21).map(f => { let q = 0; for (let i = 7; i <= 25; i++) q += f.b[i]; return 10 * Math.log10(q + 1e-20); });
+          const a = P.slice(15).reduce((x, y) => x + y, 0) / 6, bb = P.slice(0, 15).reduce((x, y) => x + y, 0) / 15, pre = P.slice(0, 15);
+          if (a - bb >= 8 && Math.max(...pre) - Math.min(...pre) < 6) T0 = T0live = F[F.length - 6].t;
+        }
+        if (!T0 && performance.now() - t0 > 30000) {   // autoradio pas à jour (sans 2e passage) : la 1re correction suffit
+          clearInterval(w); clearInterval(timer); frames = null; pass = 1;
+          say("✓ Mesure envoyée", "Correction appliquée (pas de 2e passage : mets à jour Bass Pilot).", "#39ff7a");
+          go.disabled = false; go.textContent = "🎤  Refaire une mesure"; return;
+        }
+        document.querySelectorAll(".steps div").forEach(d => d.className = d.dataset.p === "bruit" ? "on" : "");
+        return;
+      }
+      const d = performance.now() - T0;
+      let cur = STEPS[0]; for (const st of STEPS) if (d >= st[0]) cur = st;
+      document.querySelectorAll(".steps div").forEach(x => { const i = PHASES.indexOf(x.dataset.p), j = cur[1] ? PHASES.indexOf(cur[1]) : 4; x.className = i === j ? "on" : i < j ? "ok" : ""; });
+      say("2e passage : " + cur[2].toLowerCase(), "Vérification de la correction. Ne bouge pas.", "#00e5ff");
+      if (d >= 39000) { clearInterval(w); finish(); }
+    }, 300);
+  }
   function finish() {
     clearInterval(timer); clearTimeout(watchdog); if (es) es.close();
     const seg = segment();
@@ -218,20 +247,34 @@ const PAGE_VERSION = "12";
         r.g = 1;
       }
     }
-    sendSure("res " + JSON.stringify(r));
-    if (r.clip) say("Trop fort", "Le micro de l'iPhone a saturé : baisse le volume de 3 crans et recommence.", "#ff5c5c");
-    else say("✓ Mesure envoyée", "L'autoradio applique la correction.", "#39ff7a");
-    draw(r); go.disabled = false; go.textContent = "🎤  Refaire une mesure";
+    // v13 : mesure en 2 passages : le 1er règle, le 2e (correction allumée) vérifie et affine
+    if (pass === 1) {
+      r.pass = 1; r1 = r;
+      sendSure("res " + JSON.stringify(r));
+      if (r.clip) { say("Trop fort", "Le micro de l'iPhone a saturé : baisse le volume de 3 crans et recommence.", "#ff5c5c"); go.disabled = false; return; }
+      say("✓ 1er passage envoyé", "L'autoradio applique la correction puis rejoue le test pour vérifier. Ne bouge pas.", "#39ff7a");
+      draw(r);
+      startPass2();
+      return;
+    }
+    sendSure("res2 " + JSON.stringify(r));
+    if (r.clip) say("Trop fort au 2e passage", "La 1re correction reste appliquée.", "#ffc857");
+    else say("✓ Mesure terminée", "Correction vérifiée et affinée par l'autoradio.", "#39ff7a");
+    draw(r1, r); go.disabled = false; go.textContent = "🎤  Refaire une mesure"; pass = 1;
     if (wake) wake.release().catch(() => {});
   }
-  function draw(r) {
+  function draw(r, r2) {
     $("res").style.display = "block";
     const c = $("graph"), g = c.getContext("2d"), W = c.width, H = c.height;
     g.clearRect(0, 0, W, H);
     const ref = r.t.slice(9, 22).reduce((a, b) => a + b, 0) / 13, y = v => H / 2 - (v - ref) * 7, x = i => 20 + i * (W - 40) / (MF.length - 1);
     g.strokeStyle = "#2a323c"; g.lineWidth = 1; for (const d of [-12, -6, 0, 6, 12]) { g.beginPath(); g.moveTo(0, y(ref + d)); g.lineTo(W, y(ref + d)); g.stroke(); }
     const line = (arr, col, w) => { g.strokeStyle = col; g.lineWidth = w; g.beginPath(); arr.forEach((v, i) => i ? g.lineTo(x(i), y(v)) : g.moveTo(x(i), y(v))); g.stroke(); };
-    line(r.n, "#556070", 2); line(r.t, "#00e5ff", 4);
+    if (r2) {   // avant (gris) / après (cyan), chacun recalé sur ses voix
+      const ref2 = r2.t.slice(9, 22).reduce((a, b) => a + b, 0) / 13;
+      line(r.t, "#8a95a3", 3); line(r2.t.map(v => v - ref2 + ref), "#00e5ff", 4);
+      $("legende").textContent = "Gris : ta Clio avant · Cyan : après correction (plus plat = plus juste).";
+    } else { line(r.n, "#556070", 2); line(r.t, "#00e5ff", 4); }
     g.fillStyle = "#b8c3cf"; g.font = "20px -apple-system,sans-serif";
     [[0, "30 Hz"], [9, "250"], [15, "1 k"], [21, "4 k"], [27, "16 k"]].forEach(([i, t]) => g.fillText(t, Math.min(W - 60, x(i) - 14), H - 6));
   }
@@ -302,7 +345,7 @@ const PAGE_VERSION = "12";
   $("sonoStop").onclick = () => { clearInterval(sono); sono = null; $("spl").textContent = "— dB"; $("spl").style.color = ""; send("spl stop"); };
 
   go.onclick = async () => {
-    go.disabled = true; acc = {}; clip = 0; phase = null; gmax = null;
+    go.disabled = true; acc = {}; clip = 0; phase = null; gmax = null; pass = 1; r1 = null;
     document.querySelectorAll(".steps div").forEach(d => d.className = "");
     say("Micro…", "Autorise le micro si l'iPhone le demande.");
     try {
