@@ -108,6 +108,10 @@
     rms = Math.sqrt(rms / tbuf.length);
     $("niv").style.width = Math.max(0, Math.min(100, (20 * Math.log10(rms + 1e-9) + 70) * 1.6)) + "%";
     if (!phase || performance.now() - phaseAt < 1200) return;   // on laisse le son s'installer
+    // v4 (13/11, 1re vraie mesure) : le « silence » contenait déjà un peu du son de test (le message suivant arrive en retard).
+    // Chaque étape n'est donc écoutée que pendant une fenêtre sûre : silence 1,2-2,4 s, les deux 1,2-7 s, gauche / droite 1,2-5,3 s
+    const LIM = { bruit: 2400, tout: 7000, gauche: 5300, droite: 5300 };
+    if (performance.now() - phaseAt > LIM[phase]) return;
     if (pk > 0.98 && phase !== "bruit") clip++;
     const b = bands(), a = acc[phase] || (acc[phase] = { p: new Float64Array(MF.length), n: 0 });
     for (let i = 0; i < MF.length; i++) a.p[i] += b[i];
