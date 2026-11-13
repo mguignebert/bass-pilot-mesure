@@ -241,30 +241,22 @@
       } else if (m === "fin") { phase = null; finish(); }
       else if (m === "occupe") { say("Autoradio occupé", "Ferme la mesure en cours sur l'autoradio et recommence.", "#ff5c5c"); go.disabled = false; es.close(); clearInterval(timer); }
     };
-    // v5 : une seule connexion ouverte en continu (ntfy.sh limite à ~1 requête / 5 s) : 1 lecture pour le repère, puis le flux
-    const stream = async () => {
-      while (polling) {
-        try {
-          if (!primed) {   // repère : identifiant du dernier message (indépendant des horloges)
-            const txt = await (await fetch(DOWN + "/json?poll=1&since=all", { cache: "no-store" })).text();
-            for (const l of txt.split("\n")) { if (l.trim()) { const o = JSON.parse(l); if (o.id) cursor = o.id; } }
-          }
-          const rd = (await fetch(DOWN + "/json?since=" + cursor, { cache: "no-store", signal: abort.signal })).body.getReader(), dec = new TextDecoder();
-          let buf = "";
-          for (;;) {
-            const { value, done } = await rd.read(); if (done || !polling) break;
-            buf += dec.decode(value, { stream: true });
-            let i; while ((i = buf.indexOf("\n")) >= 0) {
-              const l = buf.slice(0, i); buf = buf.slice(i + 1); if (!l.trim()) continue;
-              const o = JSON.parse(l);
-              if (o.event === "open" && !primed) { primed = true; send("pret"); pretAt = Date.now(); say("Connecté", "L'autoradio va jouer le son de test…", "#00e5ff"); }
-              if (o.event === "message") { cursor = o.id; onMsg(o.message); }
-            }
-          }
-        } catch (e) { detail.textContent = "Connexion internet de l'iPhone…"; await new Promise(r => setTimeout(r, 3000)); }
-      }
+    // v6 (13/11) : retour à l'interrogation régulière côté iPhone (Safari retient les données d'une connexion continue :
+    // « pas de réponse de l'autoradio »), mais 1 fois par seconde et seulement pendant la mesure (limite de ntfy.sh)
+    const poll = async () => {
+      if (!polling) return;
+      try {
+        const txt = await (await fetch(DOWN + "/json?poll=1&since=" + cursor, { cache: "no-store" })).text();
+        for (const l of txt.split(/\r?\n/)) {
+          if (!l.trim()) continue;
+          const o = JSON.parse(l); if (o.id) cursor = o.id;
+          if (primed && o.event === "message") onMsg(o.message);
+        }
+        if (!primed) { primed = true; send("pret"); pretAt = Date.now(); say("Connecté", "L'autoradio va jouer le son de test…", "#00e5ff"); }
+      } catch (e) { detail.textContent = "Connexion internet de l'iPhone…"; }
+      setTimeout(poll, 1000);
     };
-    stream();
+    poll();
     const relance = setInterval(() => {   // l'autoradio n'a pas réagi : on renvoie « prêt » (2 fois au plus)
       if (!polling || phase || acc.tout || !primed) { if (phase || acc.tout || !polling) clearInterval(relance); return; }
       if (Date.now() - pretAt > 8000) { send("pret"); pretAt = Date.now(); detail.textContent = "Je relance l'autoradio…"; }
