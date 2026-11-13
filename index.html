@@ -21,7 +21,7 @@
   .bar { height:14px; background:#0a0d10; border-radius:7px; overflow:hidden; margin-top:10px; }
   .bar i { display:block; height:100%; width:0; background:linear-gradient(90deg,#39ff7a,#ffc857 70%,#ff5c5c); transition:width .1s; }
   canvas { width:100%; height:170px; display:block; }
-  .steps { display:flex; gap:6px; margin-top:10px; } .steps div { flex:1; text-align:center; font-size:12px; padding:6px 2px; border-radius:10px; background:#0a0d10; color:var(--mute); }
+  .steps { display:flex; gap:6px; margin-top:10px; } .steps div { flex:1; min-width:0; text-align:center; font-size:12px; padding:6px 2px; border-radius:10px; background:#0a0d10; color:var(--mute); }
   .steps div.on { background:var(--acc); color:#04161a; font-weight:800; } .steps div.ok { color:var(--ok); }
 </style>
 </head>
@@ -50,6 +50,34 @@
   <canvas id="graph" width="700" height="340"></canvas>
   <div class="mute">Grave à gauche, aigu à droite. La correction a été envoyée à l'autoradio.</div>
 </div>
+
+<div class="card">
+  <b>🔧 Réglage des amplis</b>
+  <ol class="mute">
+    <li>Mets le volume de l'autoradio à ton volume <b>le plus fort habituel</b> (par exemple 28).</li>
+    <li>Baisse d'abord le <b>gain</b> de l'ampli à régler (tourner vers la gauche).</li>
+    <li>Touche la sortie à régler : l'autoradio joue un son pur (25 s, retouche pour continuer).</li>
+    <li>Monte le gain <b>doucement</b> tant que c'est vert. Dès que ça passe orange, <b>redescends d'un petit cran</b>.</li>
+  </ol>
+  <div class="row3"><button class="b2" data-t="sub">Sub (Pioneer)</button><button class="b2" data-t="avant">Avant (MTX 1-2)</button><button class="b2" data-t="arriere">6×9 (MTX 3-4)</button></div>
+  <div id="thd" class="big">—</div>
+  <div id="thdtxt" class="mute" style="text-align:center"></div>
+  <button class="b2 stop" data-t="stop">■  Arrêter le son</button>
+</div>
+
+<div class="card">
+  <b>🔊 Test des enceintes</b>
+  <div class="mute">Chaque voie joue seule. Note quelle enceinte tu entends, et si elle craque.</div>
+  <div class="row3 r4"><button class="b2" data-v="1">Voie 1</button><button class="b2" data-v="2">Voie 2</button><button class="b2" data-v="3">Voie 3</button><button class="b2" data-v="4">Voie 4</button></div>
+  <div id="voietxt" class="mute" style="text-align:center;margin-top:8px"></div>
+  <button class="b2 stop" data-t="stop">■  Arrêter le son</button>
+</div>
+<style>
+  .row3 { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin-top:10px; } .r4 { grid-template-columns:repeat(4,minmax(0,1fr)); }
+  .b2 { padding:12px 4px; font-size:14px; white-space:normal; line-height:1.2; border-radius:12px; background:#24303c; color:#fff; } .b2.on { background:var(--acc); color:#04161a; }
+  .b2.stop { margin-top:10px; background:#3a1f24; }
+  .big { font:900 46px -apple-system,system-ui,sans-serif; text-align:center; margin:12px 0 2px; }
+</style>
 
 <script>
 (() => {
@@ -108,6 +136,49 @@
     g.fillStyle = "#b8c3cf"; g.font = "20px -apple-system,sans-serif";
     [[0, "30 Hz"], [9, "250"], [15, "1 k"], [21, "4 k"], [27, "16 k"]].forEach(([i, t]) => g.fillText(t, Math.min(W - 60, x(i) - 14), H - 6));
   }
+
+  // ---------- v3 (13/11) : réglage des amplis (distorsion en direct) et test des enceintes
+  async function micOn() {
+    if (an) { await ctx.resume(); return true; }
+    try {
+      const st = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+      ctx = ctx || new (window.AudioContext || window.webkitAudioContext)();
+      await ctx.resume();
+      an = ctx.createAnalyser(); an.fftSize = 16384; an.smoothingTimeConstant = 0;
+      fbuf = new Float32Array(an.frequencyBinCount); tbuf = new Float32Array(2048);
+      ctx.createMediaStreamSource(st).connect(an);
+      return true;
+    } catch (e) { $("thdtxt").textContent = "Micro refusé : Réglages → Safari → Micro → Autoriser."; return false; }
+  }
+  let tonef = 0, toneAt = 0, thdS = -1, thdTimer = null;
+  function thdTick() {
+    if (!tonef) return;
+    const left = Math.max(0, 25 - Math.round((performance.now() - toneAt) / 1000));
+    if (!left) { tonef = 0; $("thd").textContent = "—"; $("thdtxt").textContent = "Son arrêté (25 s). Retouche la sortie pour continuer."; return; }
+    an.getFloatFrequencyData(fbuf);
+    const hz = ctx.sampleRate / an.fftSize, pw = f => { let p = 0; const c = Math.round(f / hz); for (let k = c - 3; k <= c + 3; k++) p += Math.pow(10, fbuf[k] / 10); return p; };
+    const p1 = pw(tonef); let h = 0; for (let n = 2; n <= 5; n++) h += pw(n * tonef);
+    const lvl = 10 * Math.log10(p1 + 1e-20);
+    if (lvl < -70) { $("thd").textContent = "…"; $("thd").style.color = "#b8c3cf"; $("thdtxt").textContent = "Trop faible : monte le volume ou le gain. (" + left + " s)"; return; }
+    const thd = 100 * Math.sqrt(h / p1);
+    thdS = thdS < 0 ? thd : thdS * 0.7 + thd * 0.3;
+    // un sub déforme naturellement plus qu'un haut-parleur de portière : seuils plus larges à 50 Hz
+    const [ok, lim] = tonef < 100 ? [10, 20] : [3, 8];
+    const col = thdS < ok ? "#39ff7a" : thdS < lim ? "#ffc857" : "#ff5c5c";
+    $("thd").textContent = thdS < ok ? "PROPRE" : thdS < lim ? "LIMITE" : "SATURE";
+    $("thd").style.color = col;
+    $("thdtxt").textContent = "Distorsion " + thdS.toFixed(1) + " %  ·  " + (thdS < ok ? "tu peux monter le gain doucement" : thdS < lim ? "redescends d'un petit cran : c'est le bon réglage" : "baisse le gain tout de suite") + "  (" + left + " s)";
+  }
+  document.querySelectorAll(".b2").forEach(b => b.onclick = async () => {
+    document.querySelectorAll(".b2").forEach(x => x.classList.remove("on"));
+    if (b.dataset.t === "stop") { tonef = 0; send("stop"); $("thd").textContent = "—"; $("thd").style.color = ""; $("thdtxt").textContent = ""; $("voietxt").textContent = ""; return; }
+    if (!(await micOn())) return;
+    b.classList.add("on");
+    if (b.dataset.v) { tonef = 0; send("voie " + b.dataset.v); $("voietxt").textContent = "Voie " + b.dataset.v + " : quelle enceinte joue ? Craque-t-elle ?"; return; }
+    send("ton " + b.dataset.t); tonef = b.dataset.t === "sub" ? 50 : 1000; toneAt = performance.now(); thdS = -1;
+    $("thd").textContent = "…"; $("thdtxt").textContent = "L'autoradio lance le son…";
+    if (!thdTimer) thdTimer = setInterval(thdTick, 150);
+  });
 
   go.onclick = async () => {
     go.disabled = true; acc = {}; clip = 0; phase = null;
