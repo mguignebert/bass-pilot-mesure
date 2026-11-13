@@ -96,8 +96,25 @@
   const $ = s => document.getElementById(s), etat = $("etat"), detail = $("detail"), go = $("go");
   const say = (a, b = "", col = "") => { etat.textContent = a; etat.style.color = col; detail.textContent = b; };
   if (!id) { go.disabled = true; say("Scanne le QR code", "Sur l'autoradio : Bass Pilot → Le micro → Mesure iPhone.", "#ffc857"); return; }
-  const UP = "https://ntfy.sh/bpm" + id + "u", DOWN = "https://ntfy.sh/bpm" + id + "d";
-  const send = m => fetch(UP, { method: "POST", body: m }).catch(() => {});
+  // v7 (13/11) : plusieurs services d'échange (ntfy.sh est tombé en panne) : on prend le premier qui répond ;
+  // l'autoradio (18.8) écoute sur tous à la fois et répond sur celui-là
+  const RELAIS = ["https://ntfy.sh", "https://ntfy.envs.net", "https://ntfy.hostux.net", "https://ntfy.mzte.de"];
+  let UP = RELAIS[0] + "/bpm" + id + "u", DOWN = RELAIS[0] + "/bpm" + id + "d", SRV = null;
+  async function relais() {
+    if (SRV) return SRV;
+    for (const s of RELAIS) {
+      try {
+        const c = new AbortController(), t = setTimeout(() => c.abort(), 4000);
+        const r = await fetch(s + "/v1/health", { signal: c.signal, cache: "no-store" });
+        clearTimeout(t);
+        if (r.ok && (await r.json()).healthy) { SRV = s; break; }
+      } catch (e) {}
+    }
+    SRV = SRV || RELAIS[1];
+    UP = SRV + "/bpm" + id + "u"; DOWN = SRV + "/bpm" + id + "d";
+    return SRV;
+  }
+  const send = async m => { await relais(); return fetch(UP, { method: "POST", body: m }).catch(() => {}); };
 
   let ctx, an, fbuf, tbuf, phase = null, phaseAt = 0, acc = {}, clip = 0, es = null, timer = null, watchdog = null, wake = null;
 
@@ -243,6 +260,7 @@
     };
     // v6 (13/11) : retour à l'interrogation régulière côté iPhone (Safari retient les données d'une connexion continue :
     // « pas de réponse de l'autoradio »), mais 1 fois par seconde et seulement pendant la mesure (limite de ntfy.sh)
+    await relais();
     const poll = async () => {
       if (!polling) return;
       try {
