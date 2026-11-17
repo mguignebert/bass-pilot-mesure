@@ -27,7 +27,7 @@
 </head>
 <body>
 <h1>Bass Pilot <span>Mesure</span></h1>
-<div class="mute">L'iPhone écoute ta Clio à ta place et règle le son de l'autoradio. <span style="opacity:.6">(version 13)</span></div>
+<div class="mute">L'iPhone écoute ta Clio à ta place et règle le son de l'autoradio. <span style="opacity:.6">(version 14)</span></div>
 
 <div class="card" id="aide">
   <b>Avant de lancer</b>
@@ -49,6 +49,20 @@
   <b>Ta Clio telle qu'elle sonne</b>
   <canvas id="graph" width="700" height="340"></canvas>
   <div class="mute" id="legende">Grave à gauche, aigu à droite. La correction a été envoyée à l'autoradio.</div>
+</div>
+
+<div class="card">
+  <b>🎯 Calage pro (sub + délais)</b>
+  <div class="mute">Comme un sonorisateur : l'iPhone choisit la phase du sub (grosse caisse plus franche) et mesure quand le son de chaque haut-parleur arrive à tes oreilles. Moteur coupé, assis à ta place, iPhone à hauteur des oreilles, 25 secondes sans bouger.</div>
+  <button id="calGo" style="margin-top:10px">🎯  Calage pro</button>
+  <div id="caltxt" class="mute" style="text-align:center;margin-top:8px;white-space:pre-line"></div>
+</div>
+
+<div class="card">
+  <b>🎵 Mesure en musique</b>
+  <div class="mute">Avec ta musique Spotify, moteur tournant ou en roulant : l'iPhone écoute 45 secondes (3 s de pause au début pour entendre la route). L'égaliseur est coupé pendant la mesure. iPhone près de ta tête (appuie-tête, support ou passager), jamais en main en conduisant.</div>
+  <button id="musGo" style="margin-top:10px">🎵  Mesurer avec ma musique</button>
+  <div id="mustxt" class="mute" style="text-align:center;margin-top:8px;white-space:pre-line"></div>
 </div>
 
 <div class="card">
@@ -90,7 +104,7 @@
 
 <script>
 // v12 : la page se met à jour toute seule (GitHub et Safari gardaient l'ancienne version jusqu'à 10 min)
-const PAGE_VERSION = "13";
+const PAGE_VERSION = "14";
 (async () => {
   try {
     const t = await (await fetch(location.pathname + "?nocache=" + Date.now(), { cache: "no-store" })).text();
@@ -133,7 +147,7 @@ const PAGE_VERSION = "13";
   }
   const send = async m => { await relais(); return fetch(UP, { method: "POST", body: m }).catch(() => {}); };
 
-  let frames = null, gmax = null, ctx, an, fbuf, tbuf, phase = null, phaseAt = 0, acc = {}, clip = 0, es = null, timer = null, watchdog = null, wake = null;
+  let src = null, frames = null, gmax = null, ctx, an, fbuf, tbuf, phase = null, phaseAt = 0, acc = {}, clip = 0, es = null, timer = null, watchdog = null, wake = null;
 
   function bands() {   // puissance par tiers d'octave (somme des cases de la FFT)
     an.getFloatFrequencyData(fbuf);
@@ -288,7 +302,7 @@ const PAGE_VERSION = "13";
       await ctx.resume();
       an = ctx.createAnalyser(); an.fftSize = 16384; an.smoothingTimeConstant = 0;
       fbuf = new Float32Array(an.frequencyBinCount); tbuf = new Float32Array(2048);
-      ctx.createMediaStreamSource(st).connect(an);
+      src = ctx.createMediaStreamSource(st); src.connect(an);
       return true;
     } catch (e) { $("thdtxt").textContent = "Micro refusé : Réglages → Safari → Micro → Autoriser."; return false; }
   }
@@ -344,6 +358,139 @@ const PAGE_VERSION = "13";
   $("sonoRaz").onclick = () => { rec = 0; };
   $("sonoStop").onclick = () => { clearInterval(sono); sono = null; $("spl").textContent = "— dB"; $("spl").style.color = ""; send("spl stop"); };
 
+  // ---------- v14 (17/11) : CALAGE PRO et MESURE EN MUSIQUE
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  let raw = null, sp = null;
+  function rawStart() {   // enregistrement continu du micro (les délais se mesurent à l'échantillon près)
+    raw = [];
+    if (sp) return;
+    sp = ctx.createScriptProcessor(4096, 1, 1);
+    src.connect(sp);
+    const z = ctx.createGain(); z.gain.value = 0; sp.connect(z); z.connect(ctx.destination);
+    sp.onaudioprocess = e => { if (raw && raw.length < 600) raw.push({ t: performance.now(), d: new Float32Array(e.inputBuffer.getChannelData(0)) }); };
+  }
+  function riseT0() {   // début du bruit rose : montée de 8 dB après un vrai silence
+    const F = frames || [];
+    if (F.length <= 25) return null;
+    const P = F.slice(-21).map(f => { let q = 0; for (let i = 7; i <= 25; i++) q += f.b[i]; return 10 * Math.log10(q + 1e-20); });
+    const a = P.slice(15).reduce((x, y) => x + y, 0) / 6, bb = P.slice(0, 15).reduce((x, y) => x + y, 0) / 15, pre = P.slice(0, 15);
+    return a - bb >= 8 && Math.max(...pre) - Math.min(...pre) < 6 ? F[F.length - 6].t : null;
+  }
+  function chirp(sr) {   // le même « clic » que l'autoradio : balayage 1 → 8 kHz en 20 ms
+    const L = Math.round(sr / 50), T = L / sr, f0 = 1000, k = Math.log(8), h = new Float32Array(L);
+    for (let i = 0; i < L; i++) { const t = i / sr; h[i] = Math.sin(2 * Math.PI * f0 * T * (Math.exp(t / T * k) - 1) / k) * (0.5 - 0.5 * Math.cos(2 * Math.PI * i / (L - 1))); }
+    return h;
+  }
+  function delais(T0) {
+    if (!raw || !raw.length) return { ok: false, msg: "rien enregistré" };
+    const sr = ctx.sampleRate, n4 = raw[0].d.length;
+    const j0 = raw.findIndex(c => c.t >= T0 + 12500);
+    if (j0 < 0) return { ok: false, msg: "enregistrement trop court" };
+    const ch = raw.slice(j0), x = new Float32Array(ch.length * n4);
+    ch.forEach((c, i) => x.set(c.d, i * n4));
+    const h = chirp(sr), L = h.length, M = x.length - L, GAP = Math.round(0.7 * sr), W = Math.round(0.008 * sr);
+    if (M < GAP * 12) return { ok: false, msg: "enregistrement trop court" };
+    const e = new Float32Array(M);
+    for (let i = 0; i < M; i++) { let s = 0; for (let k = 0; k < L; k++) s += x[i + k] * h[k]; e[i] = Math.abs(s); }
+    let m = 0; for (let i = 1; i < M; i++) if (e[i] > e[m]) m = i;
+    const winMax = c => { let b = 0; for (let i = Math.max(0, c - W); i < Math.min(M, c + W); i++) if (e[i] > b) b = e[i]; return b; };
+    let best = -1, g = 0;
+    for (let k = 0; k < 12; k++) {   // le clic le plus fort est le k-ième : on cale la grille de 12 clics à 0,7 s
+      const o = m - k * GAP; if (o - W < 0 || o + 11 * GAP + W >= M) continue;
+      let sc = 0; for (let j = 0; j < 12; j++) sc += winMax(o + j * GAP);
+      if (sc > best) { best = sc; g = o; }
+    }
+    if (best < 0) return { ok: false, msg: "clics hors de l'enregistrement" };
+    const fl = []; for (let j = 0; j < 11; j++) { const c = g + j * GAP + Math.round(GAP / 2); for (let i = c - W; i < c + W; i += 7) fl.push(e[i]); }
+    fl.sort((a, b) => a - b); const floor = fl[Math.floor(fl.length / 2)] || 1e-9;
+    const arr = [[], [], [], []]; let q = 1e9;
+    for (let j = 0; j < 12; j++) {
+      const c = g + j * GAP, b = winMax(c); q = Math.min(q, b / floor);
+      let i = Math.max(0, c - W); while (i < c + W && e[i] < 0.5 * b) i++;   // le son direct : le 1er qui arrive
+      arr[j % 4].push((i - c) / sr * 1000);
+    }
+    const d = arr.map(a => a.slice().sort((p, r) => p - r)[1]);
+    return { ok: q >= 4, d: d.map(v => Math.round(v * 100) / 100), q: Math.round(q), msg: q < 4 ? "clics trop faibles, q " + Math.round(q) : "" };
+  }
+  $("calGo").onclick = async () => {
+    const B = $("calGo"), out = $("caltxt");
+    B.disabled = true;
+    if (!(await micOn())) { out.textContent = "Micro refusé : Réglages → Safari → Micro → Autoriser."; B.disabled = false; return; }
+    try { wake = await navigator.wakeLock.request("screen"); } catch (e) {}
+    await relais();
+    frames = []; T0live = null; rawStart();
+    const tm = setInterval(tick, 100);
+    send("cal");
+    let T0 = null, at = Date.now(), tries = 1, ri = Math.max(0, RELAIS.indexOf(SRV));
+    out.textContent = "L'autoradio va jouer le test… ne bouge plus.";
+    const w = setInterval(() => {
+      if (!T0) {
+        T0 = riseT0();
+        if (!T0 && raw && raw.length > 40) raw.splice(0, raw.length - 40);   // avant le test : on ne garde que les 3 dernières secondes
+        if (!T0 && Date.now() - at > 12000) {
+          if (tries >= 4) { clearInterval(w); clearInterval(tm); frames = null; raw = null; out.textContent = "Pas de son de l'autoradio : ouvre l'écran « Mesure iPhone » (avec internet) et recommence."; B.disabled = false; return; }
+          ri = (ri + 1) % RELAIS.length; fetch(RELAIS[ri] + "/bpm" + id + "u", { method: "POST", body: "cal" }).catch(() => {});
+          tries++; at = Date.now(); out.textContent = "Je relance l'autoradio (essai " + tries + ")…";
+        }
+        return;
+      }
+      const d = performance.now() - T0;
+      out.textContent = d < 6000 ? "Sub en phase normale…" : d < 12000 ? "Sub en phase inversée…" : "Un clic dans chaque haut-parleur… " + Math.max(0, Math.ceil((24000 - d) / 1000)) + " s";
+      if (d >= 24000) { clearInterval(w); clearInterval(tm); calFinish(T0, out, B); }
+    }, 300);
+  };
+  function calFinish(T0, out, B) {
+    const F = frames; frames = null;
+    const pw = (a, b) => { let p = 0, n = 0; for (const f of F) { const d = f.t - T0; if (d >= a && d <= b) { for (let i = 2; i <= 6; i++) p += f.b[i]; n++; } } return n >= 5 ? Math.round(100 * Math.log10(p / n + 1e-20)) / 10 : null; };
+    const p0 = pw(1000, 5500), p1 = pw(7000, 11500);
+    out.textContent = "Calcul des délais…";
+    setTimeout(async () => {
+      const r = delais(T0); raw = null;
+      const res = { ph: p0 != null && p1 != null ? [p0, p1] : null, d: r.d || null, dok: !!r.ok, dmsg: r.msg || "" };
+      const ok = await sendSure("calres " + JSON.stringify(res));
+      const HP = ["Avant gauche", "Avant droit", "Arrière gauche", "Arrière droit"];
+      let t = "";
+      if (res.ph) t += "Phase du sub : " + (Math.abs(p1 - p0) < 1 ? "pas de différence nette, réglage gardé" : (p1 > p0 ? "INVERSÉE" : "NORMALE") + " (+" + Math.abs(p1 - p0).toFixed(1) + " dB de grave)") + "\n";
+      if (r.ok) { const mx = Math.max(...r.d); t += "\nDélais à régler dans l'appli DSP de l'autoradio :\n" + r.d.map((v, i) => HP[i] + " : " + (mx - v).toFixed(1) + " ms (" + Math.round((mx - v) * 34.3) + " cm)").join("\n"); }
+      else t += "\nDélais : " + r.msg + ". Monte le volume de 3 crans et recommence.";
+      out.textContent = (ok ? "✓ Envoyé à l'autoradio\n\n" : "") + t;
+      B.disabled = false;
+      if (wake) wake.release().catch(() => {});
+    }, 60);
+  }
+  function avgFor(ms, cb) {   // puissance moyenne par tiers d'octave pendant ms
+    return new Promise(res => {
+      const p = new Float64Array(MF.length), t0 = performance.now(); let n = 0;
+      const iv = setInterval(() => {
+        const b = bands(); for (let i = 0; i < MF.length; i++) p[i] += b[i]; n++;
+        if (cb) cb(Math.max(0, Math.ceil((ms - (performance.now() - t0)) / 1000)));
+        if (performance.now() - t0 >= ms) { clearInterval(iv); res(Array.from(p, v => Math.round(10 * Math.log10(v / Math.max(1, n) + 1e-20) * 10) / 10)); }
+      }, 100);
+    });
+  }
+  $("musGo").onclick = async () => {
+    const B = $("musGo"), T = $("mustxt");
+    B.disabled = true;
+    if (!(await micOn())) { T.textContent = "Micro refusé : Réglages → Safari → Micro → Autoriser."; B.disabled = false; return; }
+    try { wake = await navigator.wakeLock.request("screen"); } catch (e) {}
+    await relais();
+    for (let k = 5; k > 0; k--) { T.textContent = "Pose l'iPhone près de ta tête… départ dans " + k + " s"; await sleep(1000); }
+    await send("mpause");
+    T.textContent = "Musique en pause : j'écoute la route…";
+    await sleep(3000);
+    const nz = await avgFor(3000);
+    await send("mplay");
+    T.textContent = "Musique relancée…";
+    await sleep(4500);
+    const heard = await avgFor(40000, s => { T.textContent = "J'écoute ta musique… " + s + " s"; });
+    await send("mfin");
+    await sleep(1500);
+    const ok = await sendSure("musres " + JSON.stringify({ t: heard, n: nz }));
+    T.textContent = ok ? "✓ Envoyé : l'autoradio corrige ta voiture (au-dessus de 160 Hz).\nLe résultat s'affiche sur l'écran de l'autoradio." : "Résultat non envoyé : recommence dans 5 minutes.";
+    B.disabled = false;
+    if (wake) wake.release().catch(() => {});
+  };
+
   go.onclick = async () => {
     go.disabled = true; acc = {}; clip = 0; phase = null; gmax = null; pass = 1; r1 = null;
     document.querySelectorAll(".steps div").forEach(d => d.className = "");
@@ -354,7 +501,7 @@ const PAGE_VERSION = "13";
       await ctx.resume();
       an = ctx.createAnalyser(); an.fftSize = 16384; an.smoothingTimeConstant = 0;
       fbuf = new Float32Array(an.frequencyBinCount); tbuf = new Float32Array(2048);
-      ctx.createMediaStreamSource(st).connect(an);
+      src = ctx.createMediaStreamSource(st); src.connect(an);
     } catch (e) { say("Micro refusé", "Réglages de l'iPhone → Safari → Micro → Autoriser, puis recommence.", "#ff5c5c"); go.disabled = false; return; }
     try { wake = await navigator.wakeLock.request("screen"); } catch (e) {}
     // v10 (13/11, le résultat n'arrivait plus : quota des services d'échange épuisé) : PLUS AUCUNE interrogation pendant la
