@@ -27,7 +27,7 @@
 </head>
 <body>
 <h1>Bass Pilot <span>Mesure</span></h1>
-<div class="mute">L'iPhone écoute ta Clio à ta place et règle le son de l'autoradio. <span style="opacity:.6">(version 15)</span></div>
+<div class="mute">L'iPhone écoute ta Clio à ta place et règle le son de l'autoradio. <span style="opacity:.6">(version 16)</span></div>
 
 <div class="card" id="aide">
   <b>Avant de lancer</b>
@@ -77,9 +77,9 @@
   <b>🔧 Réglage des amplis</b>
   <ol class="mute">
     <li>Mets le volume de l'autoradio à ton volume <b>le plus fort habituel</b> (par exemple 28).</li>
-    <li>Baisse d'abord le <b>gain</b> de l'ampli à régler (tourner vers la gauche).</li>
+    <li>Baisse d'abord le <b>gain</b> de l'ampli à régler (tourner vers la gauche). <b>Sub :</b> la molette du Pioneer est en panne, utilise « Gain du sub » dans Bass Pilot (⚙ Réglages) : commence à −12.</li>
     <li>Touche la sortie à régler : l'autoradio joue un son pur (25 s, retouche pour continuer).</li>
-    <li>Monte le gain <b>doucement</b> tant que c'est vert. Dès que ça passe orange, <b>redescends d'un petit cran</b>.</li>
+    <li>Monte le gain <b>doucement</b> tant que c'est vert (sub : −12 → −9 → −6…). Dès que ça passe orange, <b>redescends d'un cran</b>.</li>
   </ol>
   <div class="row3"><button class="b2" data-t="sub">Sub (Pioneer)</button><button class="b2" data-t="avant">Portières + 6×9 (MTX)</button></div>
   <div id="thd" class="big">—</div>
@@ -104,7 +104,7 @@
 
 <script>
 // v12 : la page se met à jour toute seule (GitHub et Safari gardaient l'ancienne version jusqu'à 10 min)
-const PAGE_VERSION = "15";
+const PAGE_VERSION = "16";
 (async () => {
   try {
     const t = await (await fetch(location.pathname + "?nocache=" + Date.now(), { cache: "no-store" })).text();
