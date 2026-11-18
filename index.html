@@ -27,7 +27,7 @@
 </head>
 <body>
 <h1>Bass Pilot <span>Mesure</span></h1>
-<div class="mute">L'iPhone écoute ta Clio à ta place et règle le son de l'autoradio. <span style="opacity:.6">(version 14)</span></div>
+<div class="mute">L'iPhone écoute ta Clio à ta place et règle le son de l'autoradio. <span style="opacity:.6">(version 15)</span></div>
 
 <div class="card" id="aide">
   <b>Avant de lancer</b>
@@ -81,7 +81,7 @@
     <li>Touche la sortie à régler : l'autoradio joue un son pur (25 s, retouche pour continuer).</li>
     <li>Monte le gain <b>doucement</b> tant que c'est vert. Dès que ça passe orange, <b>redescends d'un petit cran</b>.</li>
   </ol>
-  <div class="row3"><button class="b2" data-t="sub">Sub (Pioneer)</button><button class="b2" data-t="avant">Avant (MTX 1-2)</button><button class="b2" data-t="arriere">6×9 (MTX 3-4)</button></div>
+  <div class="row3"><button class="b2" data-t="sub">Sub (Pioneer)</button><button class="b2" data-t="avant">Portières + 6×9 (MTX)</button></div>
   <div id="thd" class="big">—</div>
   <div id="thdtxt" class="mute" style="text-align:center"></div>
   <button class="b2 stop" data-t="stop">■  Arrêter le son</button>
@@ -89,7 +89,7 @@
 
 <div class="card">
   <b>🔊 Test des enceintes</b>
-  <div class="mute">Chaque voie joue seule. Note quelle enceinte tu entends, et si elle craque.</div>
+  <div class="mute">Chaque voie joue seule. Note quelle enceinte tu entends, et si elle craque. Dans ta Clio : voie 1 = côté droit, voie 2 = côté gauche (avant + arrière), voies 3-4 non branchées.</div>
   <div class="row3 r4"><button class="b2" data-v="1">Voie 1</button><button class="b2" data-v="2">Voie 2</button><button class="b2" data-v="3">Voie 3</button><button class="b2" data-v="4">Voie 4</button></div>
   <div id="voietxt" class="mute" style="text-align:center;margin-top:8px"></div>
   <button class="b2 stop" data-t="stop">■  Arrêter le son</button>
@@ -104,7 +104,7 @@
 
 <script>
 // v12 : la page se met à jour toute seule (GitHub et Safari gardaient l'ancienne version jusqu'à 10 min)
-const PAGE_VERSION = "14";
+const PAGE_VERSION = "15";
 (async () => {
   try {
     const t = await (await fetch(location.pathname + "?nocache=" + Date.now(), { cache: "no-store" })).text();
@@ -448,10 +448,13 @@ const PAGE_VERSION = "14";
       const r = delais(T0); raw = null;
       const res = { ph: p0 != null && p1 != null ? [p0, p1] : null, d: r.d || null, dok: !!r.ok, dmsg: r.msg || "" };
       const ok = await sendSure("calres " + JSON.stringify(res));
-      const HP = ["Avant gauche", "Avant droit", "Arrière gauche", "Arrière droit"];
       let t = "";
       if (res.ph) t += "Phase du sub : " + (Math.abs(p1 - p0) < 1 ? "pas de différence nette, réglage gardé" : (p1 > p0 ? "INVERSÉE" : "NORMALE") + " (+" + Math.abs(p1 - p0).toFixed(1) + " dB de grave)") + "\n";
-      if (r.ok) { const mx = Math.max(...r.d); t += "\nDélais à régler dans l'appli DSP de l'autoradio :\n" + r.d.map((v, i) => HP[i] + " : " + (mx - v).toFixed(1) + " ms (" + Math.round((mx - v) * 34.3) + " cm)").join("\n"); }
+      if (r.ok) {   // v15 : dans la Clio, voie 1 = côté droit, voie 2 = côté gauche (avant + arrière ensemble) : gauche / droite seulement
+        const l = (r.d[0] + r.d[2]) / 2, rr = (r.d[1] + r.d[3]) / 2, gap = Math.abs(l - rr);
+        t += gap < 0.3 ? "\nGauche et droite t'arrivent ensemble (écart " + gap.toFixed(2) + " ms) : aucun délai à régler ✓"
+          : "\nLe côté " + (l < rr ? "GAUCHE" : "DROIT") + " t'arrive " + gap.toFixed(1) + " ms plus tôt : retarde-le de " + gap.toFixed(1) + " ms (" + Math.round(gap * 34.3) + " cm) dans l'appli DSP de l'autoradio";
+      }
       else t += "\nDélais : " + r.msg + ". Monte le volume de 3 crans et recommence.";
       out.textContent = (ok ? "✓ Envoyé à l'autoradio\n\n" : "") + t;
       B.disabled = false;
