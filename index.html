@@ -27,7 +27,7 @@
 </head>
 <body>
 <h1>Bass Pilot <span>Mesure</span></h1>
-<div class="mute">L'iPhone écoute ta Clio à ta place et règle le son de l'autoradio. <span style="opacity:.6">(version 16)</span></div>
+<div class="mute">L'iPhone écoute ta Clio à ta place et règle le son de l'autoradio. <span style="opacity:.6">(version 17)</span></div>
 
 <div class="card" id="aide">
   <b>Avant de lancer</b>
@@ -306,16 +306,25 @@ const PAGE_VERSION = "16";
       return true;
     } catch (e) { $("thdtxt").textContent = "Micro refusé : Réglages → Safari → Micro → Autoriser."; return false; }
   }
-  let tonef = 0, toneAt = 0, thdS = -1, thdTimer = null;
+  let tonef = 0, toneAt = 0, thdS = -1, thdTimer = null, noise = null;
+  // v17 (19/11) : « ça marquait SATURE alors que le son était bas » : le moteur au ralenti et la bosse 100-250 Hz de la Clio
+  // tombent pile sur les harmoniques du 50 Hz. On écoute d'abord le bruit 1 s (son coupé) et on le retire du calcul.
+  const binPow = (f) => { const hz = ctx.sampleRate / an.fftSize, c = Math.round(f / hz); let p = 0; for (let k = c - 3; k <= c + 3; k++) p += Math.pow(10, fbuf[k] / 10); return p; };
+  async function listenNoise(f) {
+    const acc = [0, 0, 0, 0, 0, 0]; let n = 0;
+    for (let i = 0; i < 8; i++) { await new Promise(r => setTimeout(r, 125)); an.getFloatFrequencyData(fbuf); for (let h = 1; h <= 5; h++) acc[h] += binPow(h * f); n++; }
+    return acc.map(v => v / n);
+  }
   function thdTick() {
     if (!tonef) return;
     const left = Math.max(0, 25 - Math.round((performance.now() - toneAt) / 1000));
     if (!left) { tonef = 0; $("thd").textContent = "—"; $("thdtxt").textContent = "Son arrêté (25 s). Retouche la sortie pour continuer."; return; }
     an.getFloatFrequencyData(fbuf);
-    const hz = ctx.sampleRate / an.fftSize, pw = f => { let p = 0; const c = Math.round(f / hz); for (let k = c - 3; k <= c + 3; k++) p += Math.pow(10, fbuf[k] / 10); return p; };
-    const p1 = pw(tonef); let h = 0; for (let n = 2; n <= 5; n++) h += pw(n * tonef);
+    const nz = noise || [0, 0, 0, 0, 0, 0];
+    const p1raw = binPow(tonef), p1 = Math.max(0, p1raw - nz[1]); let h = 0; for (let n = 2; n <= 5; n++) h += Math.max(0, binPow(n * tonef) - 1.5 * nz[n]);   // v17 : bruit retiré
     const lvl = 10 * Math.log10(p1 + 1e-20);
-    if (lvl < -70) { $("thd").textContent = "…"; $("thd").style.color = "#b8c3cf"; $("thdtxt").textContent = "Trop faible : monte le volume ou le gain. (" + left + " s)"; return; }
+    // v17 : le son doit dépasser le bruit de 15 dB
+    if (lvl < -70 || p1raw < 30 * (nz[1] + 1e-20)) { $("thd").textContent = "…"; $("thd").style.color = "#b8c3cf"; $("thdtxt").textContent = "Trop faible par rapport au bruit (moteur) : monte le volume. (" + left + " s)"; return; }
     const thd = 100 * Math.sqrt(h / p1);
     thdS = thdS < 0 ? thd : thdS * 0.7 + thd * 0.3;
     // un sub déforme naturellement plus qu'un haut-parleur de portière : seuils plus larges à 50 Hz
@@ -331,8 +340,11 @@ const PAGE_VERSION = "16";
     if (!(await micOn())) return;
     b.classList.add("on");
     if (b.dataset.v) { tonef = 0; send("voie " + b.dataset.v); $("voietxt").textContent = "Voie " + b.dataset.v + " : quelle enceinte joue ? Craque-t-elle ?"; return; }
-    send("ton " + b.dataset.t); tonef = b.dataset.t === "sub" ? 50 : 1000; toneAt = performance.now(); thdS = -1;
-    $("thd").textContent = "…"; $("thdtxt").textContent = "L'autoradio lance le son…";
+    const tf = b.dataset.t === "sub" ? 50 : 1000;
+    tonef = 0; send("stop"); $("thd").textContent = "…"; $("thd").style.color = "#b8c3cf"; $("thdtxt").textContent = "J'écoute d'abord le bruit (moteur, ventilation) : 1 seconde…";
+    noise = await listenNoise(tf);   // v17
+    send("ton " + b.dataset.t); tonef = tf; toneAt = performance.now(); thdS = -1;
+    $("thdtxt").textContent = "L'autoradio lance le son…";
     if (!thdTimer) thdTimer = setInterval(thdTick, 150);
   });
 
